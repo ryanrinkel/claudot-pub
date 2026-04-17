@@ -118,11 +118,54 @@ func _probe_executable(name: String) -> int:
 	return -1  # Not found
 
 
+## Dependency Management
+
+func _ensure_deps(launcher: String) -> bool:
+	## When using plain python (not uv), check that required packages are installed.
+	## Auto-installs them via pip if missing. Returns true if deps are ready.
+	## uv handles this automatically via inline script metadata, so skip for uv.
+	if launcher == "uv":
+		return true
+
+	# Quick import check — if this succeeds, deps are already installed
+	var output: Array = []
+	var exit_code = OS.execute(
+		launcher,
+		PackedStringArray(["-c", "import claude_agent_sdk; import anyio"]),
+		output,
+		true
+	)
+	if exit_code == 0:
+		return true
+
+	# Missing deps — install automatically
+	print("[Claudot] Installing Python dependencies (first run)...")
+	var pip_output: Array = []
+	var pip_exit = OS.execute(
+		launcher,
+		PackedStringArray(["-m", "pip", "install", "claude-agent-sdk>=0.1.0", "anyio>=4.0.0"]),
+		pip_output,
+		true
+	)
+	if pip_exit != 0:
+		var msg = "[b]Failed to install Python dependencies.[/b]\n\nTry running manually:\n  %s -m pip install claude-agent-sdk anyio\n\nOr install uv (recommended) which handles dependencies automatically." % launcher
+		push_error("[Claudot BridgeLauncher] " + msg)
+		launcher_error.emit(msg)
+		return false
+
+	print("[Claudot] Dependencies installed successfully.")
+	return true
+
+
 ## Bridge Launch
 
 func _launch_bridge(launcher: String) -> void:
 	## Launch agent_bridge.py using the detected launcher.
+	## Ensures dependencies are installed first (for plain python).
 	## Uses OS.create_process() — non-blocking, returns PID immediately.
+	if not _ensure_deps(launcher):
+		return
+
 	var script_abs = ProjectSettings.globalize_path("res://addons/claudot/bridge/agent_bridge.py")
 	var project_root = ProjectSettings.globalize_path("res://")
 

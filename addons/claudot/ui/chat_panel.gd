@@ -13,7 +13,7 @@ const ConversationStorage = preload("res://addons/claudot/ui/conversation_storag
 const TCPClient = preload("res://addons/claudot/network/tcp_client.gd")
 const ContextProvider = preload("res://addons/claudot/mcp/context_provider.gd")
 
-const CLAUDOT_VERSION = "v2.0 BETA"
+const CLAUDOT_VERSION = "v2.3.0-beta"
 const CLAUDOT_RELEASES_URL = "https://github.com/claudot-dev/claudot/releases"
 
 # Reference to TCP client (set by plugin before entering tree)
@@ -46,6 +46,7 @@ func _ready() -> void:
 	conversation_tab.clear_confirmed.connect(_on_clear_confirmed)
 	conversation_tab.ask_user_answered.connect(_on_ask_user_answered)
 	conversation_tab.permission_answered.connect(_on_permission_answered)
+	conversation_tab.stop_requested.connect(_on_stop_requested)
 	connect_button.pressed.connect(_on_connect_pressed)
 
 	# Set initial disconnected state
@@ -473,6 +474,16 @@ func _on_permission_answered(decision: String) -> void:
 	if console_tab:
 		console_tab.append_json_message(params, "request")
 	tcp_client.send_message("chat/permission_response", params)
+
+
+func _on_stop_requested() -> void:
+	## Handle stop button — send interrupt to bridge.
+	if tcp_client == null or tcp_client.current_state != TCPClient.ConnectionState.CONNECTED:
+		return
+	if not is_working:
+		return
+	tcp_client.send_message("chat/cancel", {})
+	conversation_tab.append_system_message("Interrupt sent.")
 
 
 func _on_connection_error(error_message: String) -> void:

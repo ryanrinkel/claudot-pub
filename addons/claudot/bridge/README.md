@@ -238,6 +238,19 @@ Godot MCP handler not responding.
 - Verify `addons/claudot/mcp/mcp_handler.gd` is loaded
 - Check that plugin is in editor mode (@tool annotations present)
 
+## Packaging / Distribution
+
+When creating a distribution zip, include **all** files under `addons/claudot/` except `__pycache__/` directories and `.env`. Critically, this includes `.gd.uid` files — Godot 4.x uses these for resource UID tracking. Without them, `preload()` calls in the plugin script fail to resolve and the plugin won't appear in Project Settings > Plugins.
+
+**Exclude:**
+- `bridge/__pycache__/` — Python bytecode cache
+- `bridge/.env` — user-specific API key
+
+**Must include:**
+- All `.gd.uid` files (one per `.gd` script)
+- `ui/chat_panel.tscn`
+- `plugin.cfg`
+
 ## License
 
 See main project LICENSE file.

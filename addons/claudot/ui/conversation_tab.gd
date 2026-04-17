@@ -18,6 +18,7 @@ signal clear_confirmed()  # Emitted when user confirms clear action
 signal user_input_submitted(answer: Dictionary)  # Emitted when user answers an input widget
 signal ask_user_answered(text: String)  # Emitted when user answers an AskUserQuestion tool call
 signal permission_answered(decision: String)  # Emitted when user allows/denies a tool permission request
+signal stop_requested  # Emitted when user clicks the stop button to interrupt Claude
 
 # State
 var conversation: Array = []
@@ -58,6 +59,7 @@ var scroll_container: ScrollContainer
 var output: RichTextLabel
 var message_input: LineEdit
 var send_button: Button
+var stop_button: Button
 var working_label: Label
 
 
@@ -663,6 +665,14 @@ func _build_ui() -> void:
 	send_button.text = "Send"
 	input_container.add_child(send_button)
 
+	stop_button = Button.new()
+	stop_button.name = "StopButton"
+	stop_button.text = "\u{1F6D1}"
+	stop_button.tooltip_text = "Stop Claude (interrupt)"
+	stop_button.visible = false
+	stop_button.pressed.connect(_on_stop_pressed)
+	input_container.add_child(stop_button)
+
 
 func _setup_context_menu() -> void:
 	## Setup right-click context menu on output RichTextLabel.
@@ -764,6 +774,11 @@ func _on_send_pressed() -> void:
 		# This ensures the user's own message and subsequent assistant replies are visible.
 		scroll_indicator_button.visible = false
 		_force_scroll_to_bottom()
+
+
+func _on_stop_pressed() -> void:
+	## Handle Stop button click — interrupt Claude's processing.
+	stop_requested.emit()
 
 
 func append_message(sender: String, content: String) -> void:
@@ -904,6 +919,8 @@ func set_working(working: bool) -> void:
 		message_input.editable = not working
 	if send_button:
 		send_button.disabled = working
+	if stop_button:
+		stop_button.visible = working
 
 
 func update_context_usage(pct: float) -> void:

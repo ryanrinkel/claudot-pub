@@ -30,7 +30,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import re
 
 import anyio
 from claude_agent_sdk import (
@@ -45,100 +44,6 @@ from claude_agent_sdk import (
 )
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Godot docs auto-injection helpers
-# ---------------------------------------------------------------------------
-
-try:
-    from godot_docs import (
-        get_known_classes,
-        load_cached_class,
-        format_concise_docs,
-        FALLBACK_VERSION as GODOT_DOCS_VERSION,
-        resolve_method_to_class,
-        GODOT4_GOTCHAS,
-        get_gotcha_notes,
-        init_from_classdb,
-    )
-    _GODOT_DOCS_AVAILABLE = True
-except ImportError:
-    _GODOT_DOCS_AVAILABLE = False
-    logger.warning("godot_docs not available — class doc auto-injection disabled")
-
-# Lazy-loaded set of known Godot class names (populated from cache on first use)
-_godot_class_names: set[str] = set()
-_godot_class_names_loaded: bool = False
-_godot_class_names_version: int = 0  # Bumped when ClassDB init refreshes the cache
-
-_CAMEL_CASE_RE = re.compile(r'\b([A-Z][a-zA-Z0-9]*(?:2D|3D)?)\b')
-_SNAKE_CASE_METHOD_RE = re.compile(r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b')
-
-
-def _detect_all_godot_classes(
-    text: str,
-    context: dict,
-    max_classes: int = 5
-) -> tuple[list[tuple[str, str]], list[str]]:
-    """
-    4-layer Godot class detection for doc injection.
-
-    Layer 1: Scene context — extract node types from editor context dict.
-    Layer 2: CamelCase class names in message text.
-    Layer 3: snake_case method name resolution via resolve_method_to_class.
-    Layer 4: Godot 3-to-4 gotcha notes (independent of class cap).
-
-    Returns:
-        - List of (class_name, source_label) tuples, capped at max_classes, deduped.
-        - List of gotcha note strings.
-    """
-    global _godot_class_names, _godot_class_names_loaded
-    if not _GODOT_DOCS_AVAILABLE:
-        return [], []
-    try:
-        if not _godot_class_names_loaded:
-            _godot_class_names = get_known_classes(GODOT_DOCS_VERSION)
-            _godot_class_names_loaded = True
-
-        seen: set[str] = set()
-        result: list[tuple[str, str]] = []
-
-        def _add(cls: str, label: str) -> None:
-            if cls not in seen and cls in _godot_class_names:
-                seen.add(cls)
-                result.append((cls, label))
-
-        # Layer 1: Scene context — extract node types from context dict
-        if context:
-            root_type = context.get("scene_root_type", "")
-            if root_type:
-                _add(root_type, "From scene")
-            for node in context.get("selected_nodes", []):
-                node_type = node.get("type", "")
-                if node_type:
-                    _add(node_type, "From scene")
-
-        # Layer 2: CamelCase class names in message text
-        for match in _CAMEL_CASE_RE.finditer(text):
-            token = match.group(1)
-            _add(token, "Detected")
-
-        # Layer 3: snake_case method name resolution
-        for match in _SNAKE_CASE_METHOD_RE.finditer(text):
-            if len(result) >= max_classes:
-                break
-            method_name = match.group(1)
-            owner_class = resolve_method_to_class(method_name)
-            if owner_class:
-                _add(owner_class, "Method lookup")
-
-        # Layer 4: Gotcha notes (independent of class cap)
-        gotcha_notes = get_gotcha_notes(text)
-
-        return result[:max_classes], gotcha_notes
-    except Exception:
-        return [], []
-
 
 # Context window sizes by model family (prefix match)
 # Claude Code CLI uses 1M context for Opus/Sonnet 4.x by default
@@ -477,6 +382,10 @@ class AgentBridge:
             elif method == "chat/permission_response":
                 decision = msg.get("params", {}).get("decision", "deny")
                 await self._permission_queue.put(decision)
+            elif method == "chat/cancel":
+                if self._client:
+                    logger.info("Interrupt requested by user")
+                    await self._client.interrupt()
             else:
                 logger.warning(f"Unknown method from Godot: {method}")
 
@@ -520,6 +429,7 @@ class AgentBridge:
         self._query_queue = asyncio.Queue()
         self._permission_queue = asyncio.Queue()
         self._session_allowed_tools = set()
+        self._client = None
         self._detected_model = None
         self._plan_mode = False
 
@@ -543,6 +453,7 @@ class AgentBridge:
         logger.info("Creating persistent Claude session...")
 
         async with ClaudeSDKClient(options=options) as client:
+            self._client = client
             logger.info("Claude session established")
 
             # Log server info for diagnostics (model/context info discovery)
@@ -552,22 +463,6 @@ class AgentBridge:
                     logger.info(f"Server info keys: {list(server_info.keys())}")
             except Exception:
                 pass
-
-            # Initialize Godot class docs from ClassDB (populates class list for
-            # auto-injection detection — all classes available from first message)
-            if _GODOT_DOCS_AVAILABLE:
-                try:
-                    global _godot_class_names_loaded, _godot_class_names_version
-                    success = await init_from_classdb()
-                    if success:
-                        # Force reload of class names set on next detection call
-                        _godot_class_names_loaded = False
-                        _godot_class_names_version += 1
-                        logger.info("ClassDB doc cache initialized — full class detection enabled")
-                    else:
-                        logger.debug("ClassDB init skipped (bridge not ready) — using cached class list")
-                except Exception as e:
-                    logger.debug(f"ClassDB init error (non-fatal): {e}")
 
             # Send initial system message
             await self.tcp_connection.send_message({
@@ -632,45 +527,6 @@ class AgentBridge:
                 prompt = f"**Current Godot Editor Context:**\n{context_str}\n\n**User Message:**\n{content}"
             else:
                 prompt = content
-
-        # Auto-inject Godot class reference via 4-layer detection
-        try:
-            detected, gotcha_notes = _detect_all_godot_classes(content, context)
-            if detected or gotcha_notes:
-                docs_parts: list[str] = []
-                for cls_name, source_label in detected:
-                    cls_data = load_cached_class(GODOT_DOCS_VERSION, cls_name)
-                    if cls_data and "error" not in cls_data:
-                        formatted = format_concise_docs(cls_data)
-                        # Replace the ### header to include source label
-                        formatted = formatted.replace(
-                            f"### {cls_name}",
-                            f"### [{source_label}] {cls_name}",
-                            1
-                        )
-                        docs_parts.append(formatted)
-
-                injection_lines: list[str] = []
-                if docs_parts:
-                    header = (
-                        "## Godot API Reference (auto-injected)\n"
-                        "*Injected based on scene context and message content. "
-                        "Authoritative — prefer over training data.*\n"
-                    )
-                    injection_lines.append(header)
-                    injection_lines.append("\n\n".join(docs_parts))
-
-                if gotcha_notes:
-                    injection_lines.append("")
-                    injection_lines.append("**Godot 4 notes:**")
-                    injection_lines.extend(gotcha_notes)
-
-                if injection_lines:
-                    docs_block = "\n---\n" + "\n".join(injection_lines) + "\n---\n\n"
-                    # Prepend so Claude sees it before the user message / context
-                    prompt = docs_block + prompt
-        except Exception:
-            pass  # Graceful degradation — never block message send
 
         return prompt
 
